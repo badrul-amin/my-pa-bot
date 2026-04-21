@@ -2,14 +2,13 @@ import os
 import json
 import re
 from datetime import datetime
-from groq import Groq
+import google.generativeai as genai
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
-import asyncio
 
 # ── clients ──────────────────────────────────────────────────────────────
-groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
+genai.configure(api_key=os.environ["GEMINI_API_KEY"])
 scheduler = AsyncIOScheduler()
 
 # ── simple file-based storage ─────────────────────────────────────────────
@@ -34,7 +33,7 @@ def get_user(user_id):
     return data[uid], data, uid
 
 # ── AI brain ──────────────────────────────────────────────────────────────
-def ask_groq(history, user_notes, retries=3):
+def ask_gemini(history, user_notes):
     notes_text = "\n".join(f"- {n}" for n in user_notes) if user_notes else "No notes yet."
     system_prompt = f"""You are a smart, friendly personal AI assistant and PA. You talk like a helpful best friend — casual, warm, and always understanding.
 
@@ -45,6 +44,7 @@ The user is Malaysian and may write in Manglish, broken English, Malay, or mix a
 - "penat la hari ni" = they're tired today, respond with empathy
 - "what time i should eat" = give advice on meal timing
 - "i boring" = they're bored, suggest something fun or chat
+- "explain python" = explain Python programming in simple words
 
 You help with:
 - Answering any questions and explaining things simply and clearly
@@ -69,21 +69,27 @@ Important rules:
 - Use emojis naturally but don't overdo it
 - Never say "As an AI" or "I cannot" — just help them!"""
 
-    for attempt in range(retries):
-        try:
-            response = groq_client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
-                messages=[{"role": "system", "content": system_prompt}] + history,
-                max_tokens=1000,
-                temperature=0.7
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"Groq attempt {attempt+1} failed: {e}")
-            if attempt < retries - 1:
-                asyncio.sleep(2)
-            else:
-                raise e
+    try:
+        model = genai.GenerativeModel(
+            model_name="gemini-2.0-flash",
+            system_instruction=system_prompt
+        )
+
+        # convert history to gemini format
+        gemini_history = []
+        for msg in history[:-1]:  # all except last message
+            gemini_history.append({
+                "role": "user" if msg["role"] == "user" else "model",
+                "parts": [msg["content"]]
+            })
+
+        chat = model.start_chat(history=gemini_history)
+        response = chat.send_message(history[-1]["content"])
+        return response.text
+
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        raise e
 
 # ── commands ──────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -151,12 +157,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # show typing indicator
     await context.bot.send_chat_action(update.effective_chat.id, "typing")
 
-    # get AI reply with retry + fallback
+    # get AI reply with fallback
     try:
-        reply = ask_groq(data[uid]["history"], data[uid]["notes"])
+        reply = ask_gemini(data[uid]["history"], data[uid]["notes"])
     except Exception as e:
-        print(f"Groq error: {e}")
-        # fallback — always reply something
+        print(f"Gemini error: {e}")
         reply = "Eh sorry, my brain lagged sikit 😅 Try again in a few seconds!"
 
     data[uid]["history"].append({"role": "assistant", "content": reply})
