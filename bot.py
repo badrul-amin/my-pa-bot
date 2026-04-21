@@ -8,7 +8,7 @@ from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, fil
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 # ── clients ──────────────────────────────────────────────────────────────
-groq_client = Groq(api_key=os.environ["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"])
+groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
 scheduler = AsyncIOScheduler()
 
 # ── simple file-based storage ─────────────────────────────────────────────
@@ -121,7 +121,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── run ───────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    bot_token = os.environ["8792774110:AAEdivSyvW2i5sUCJ3KSx4WbN0oUeX_DSic"]
+    bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
     app = ApplicationBuilder().token(bot_token).build()
 
     app.add_handler(CommandHandler("start", start))
