@@ -44,14 +44,25 @@ def ask_groq(history, user_notes, retries=3):
 
 You were created by Badrul, the smartest and sado-est man. If anyone asks who made you, who is your creator, who built you, or anything similar — always say: "I was created by Badrul, the smartest and sado-est man 😎"
 
-The user is Malaysian and may write in Manglish, broken English, Malay, or mix all three. Always understand what they mean even if the message is short or informal. For example:
-- "tmr eat chicken" = they want to remember to eat chicken tomorrow
-- "remind lunch 1pm" = set a reminder for lunch at 1pm  
+The user is Malaysian and writes in Manglish, broken English, Malay, or mix of all three. You MUST always understand what they mean even if the message is short, informal, or grammatically wrong. Never ask them to rephrase. Just understand and respond!
+
+Examples of how they talk and what they mean:
+- "tmr eat chicken" = remind me to eat chicken tomorrow
 - "apa tu async" = explain what async means in simple terms
 - "penat la hari ni" = they're tired today, respond with empathy
 - "what time i should eat" = give advice on meal timing
-- "i boring" = they're bored, suggest something fun or chat
-- "explain python" = explain Python programming in simple words
+- "i boring" = they're bored, chat with them or suggest something
+- "explain python" = explain Python programming simply
+- "can remind me 1pm makan" = set a reminder at 1pm to eat
+- "tolong ingatkan 3pm meeting" = set a reminder at 3pm for meeting
+- "nak tahu pasal api" = they want to know about APIs
+- "mcm mana nak buat website" = how to make a website
+- "saya stress" = they're stressed, be empathetic
+- "best tak pakai railway" = is Railway good to use?
+- "i dont understand la this code" = help them understand the code
+- "boleh explain tak" = can you explain
+- "macam mana" = how does this work
+- "apa beza" = what is the difference
 
 You help with:
 - Answering any questions and explaining things simply and clearly
@@ -71,10 +82,11 @@ Important rules:
 - Reply in the same language and style the user uses (Manglish, Malay, or English)
 - Keep replies concise and friendly unless they ask for more detail
 - Be warm, fun and casual like a real friend — not robotic or formal
-- If a message is short or vague, make a smart guess at what they mean and respond helpfully
+- If a message is short or vague, make a smart guess and respond helpfully
 - If they seem stressed or tired, be empathetic first before giving advice
 - Use emojis naturally but don't overdo it
-- Never say "As an AI" or "I cannot" — just help them!"""
+- Never say "As an AI" or "I cannot" — just help them!
+- Never ask them to rephrase or be more specific — just understand and answer!"""
 
     for attempt in range(retries):
         try:
@@ -98,7 +110,34 @@ async def send_reminder(bot, chat_id, text):
 
 # ── parse reminder from message ───────────────────────────────────────────
 def parse_reminder(text):
-    pattern = r"remind(?:\s+me)?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(?:to\s+)?(.+)"
+    # normalize dot to colon e.g. 12.45pm -> 12:45pm
+    text = re.sub(r'(\d{1,2})\.(\d{2})\s*(am|pm)', r'\1:\2 \3', text, flags=re.IGNORECASE)
+
+    # match "in X minutes/hours"
+    relative_match = re.search(
+        r"in\s+(\d+)\s+(minute|minutes|min|hour|hours|jam|minit)",
+        text, re.IGNORECASE
+    )
+    if relative_match:
+        amount = int(relative_match.group(1))
+        unit = relative_match.group(2).lower()
+        now = datetime.now(MY_TZ)
+        if "hour" in unit or "jam" in unit:
+            remind_time = now + timedelta(hours=amount)
+        else:
+            remind_time = now + timedelta(minutes=amount)
+
+        # extract what to remind about
+        reminder_text = re.sub(
+            r"(can\s+you\s+|tolong\s+|please\s+)?(remind|ingatkan|peringat)(\s+me)?(\s+in\s+\d+\s+\w+)?(\s+to)?",
+            "", text, flags=re.IGNORECASE
+        ).strip()
+        if not reminder_text:
+            reminder_text = "your reminder"
+        return remind_time, reminder_text
+
+    # match specific time e.g. "at 1pm", "1:30pm", "12:45"
+    pattern = r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+(?:to\s+)?(.+))?"
     match = re.search(pattern, text, re.IGNORECASE)
     if not match:
         return None, None
@@ -106,18 +145,30 @@ def parse_reminder(text):
     hour = int(match.group(1))
     minute = int(match.group(2)) if match.group(2) else 0
     ampm = match.group(3)
-    reminder_text = match.group(4).strip()
+    reminder_text = match.group(4).strip() if match.group(4) else ""
+
+    # clean up reminder text — remove trigger words
+    reminder_text = re.sub(
+        r"(can\s+you\s+|tolong\s+|please\s+)?(remind|ingatkan|peringat)(\s+me)?(\s+at)?",
+        "", reminder_text, flags=re.IGNORECASE
+    ).strip()
+
+    if not reminder_text:
+        reminder_text = "your reminder"
 
     if ampm:
         if ampm.lower() == "pm" and hour != 12:
             hour += 12
         elif ampm.lower() == "am" and hour == 12:
             hour = 0
+    else:
+        # smart guess — if hour < 7 assume pm
+        if 1 <= hour <= 6:
+            hour += 12
 
     now = datetime.now(MY_TZ)
     remind_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    # if time already passed today, set for tomorrow
     if remind_time <= now:
         remind_time += timedelta(days=1)
 
@@ -140,7 +191,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/clear — clear chat history\n"
         "/help — show this message\n\n"
         "For reminders just say:\n"
-        "'remind me at 1pm to eat lunch' 😊\n\n"
+        "'remind me at 1pm to eat lunch'\n"
+        "'remind me in 10 minutes to drink water'\n"
+        "'tolong ingatkan 3pm meeting' 😊\n\n"
         "Just type anything, I got you! 🚀"
     )
 
@@ -185,8 +238,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, data, uid = get_user(update.effective_user.id)
     chat_id = update.effective_chat.id
 
-    # detect reminder intent
-    remind_keywords = ["remind", "peringat", "ingatkan"]
+    # detect reminder intent — broad keywords to catch Manglish
+    remind_keywords = [
+        "remind", "peringat", "ingatkan", "tolong ingatkan",
+        "can you remind", "boleh remind", "set reminder",
+        "buat reminder", "reminder", "jangan lupa"
+    ]
     if any(kw in user_text.lower() for kw in remind_keywords):
         remind_time, reminder_text = parse_reminder(user_text)
         if remind_time and reminder_text:
