@@ -63,6 +63,10 @@ Examples of how they talk and what they mean:
 - "boleh explain tak" = can you explain
 - "macam mana" = how does this work
 - "apa beza" = what is the difference
+- "12 malam" = 12 midnight / 12 AM
+- "8 malam" = 8 PM
+- "7 pagi" = 7 AM
+- "3 petang" = 3 PM
 
 You help with:
 - Answering any questions and explaining things simply and clearly
@@ -110,8 +114,19 @@ async def send_reminder(bot, chat_id, text):
 
 # ── parse reminder from message ───────────────────────────────────────────
 def parse_reminder(text):
-    # normalize dot to colon e.g. 12.45pm -> 12:45pm
-    text = re.sub(r'(\d{1,2})\.(\d{2})\s*(am|pm)', r'\1:\2 \3', text, flags=re.IGNORECASE)
+    # normalize dot to colon e.g. 5.30 -> 5:30, 12.45pm -> 12:45pm
+    text = re.sub(r'(\d{1,2})\.(\d{2})(\s*(am|pm))?', r'\1:\2\3', text, flags=re.IGNORECASE)
+
+    # detect Malay time words
+    malay_time = ""
+    if re.search(r"malam|mlm", text, re.IGNORECASE):
+        malay_time = "pm"
+    elif re.search(r"pagi", text, re.IGNORECASE):
+        malay_time = "am"
+    elif re.search(r"tengah\s*hari|tgh\s*hari", text, re.IGNORECASE):
+        malay_time = "pm"
+    elif re.search(r"petang|ptg", text, re.IGNORECASE):
+        malay_time = "pm"
 
     # match "in X minutes/hours"
     relative_match = re.search(
@@ -132,11 +147,13 @@ def parse_reminder(text):
             r"(can\s+you\s+|tolong\s+|please\s+)?(remind|ingatkan|peringat)(\s+me)?(\s+in\s+\d+\s+\w+)?(\s+to)?",
             "", text, flags=re.IGNORECASE
         ).strip()
+        # clean up Malay time words from reminder text
+        reminder_text = re.sub(r"\b(malam|mlm|pagi|petang|ptg|tengah\s*hari|tgh\s*hari)\b", "", reminder_text, flags=re.IGNORECASE).strip()
         if not reminder_text:
             reminder_text = "your reminder"
         return remind_time, reminder_text
 
-    # match specific time e.g. "at 1pm", "1:30pm", "12:45"
+    # match specific time e.g. "at 1pm", "1:30pm", "12:45", "8 malam"
     pattern = r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+(?:to\s+)?(.+))?"
     match = re.search(pattern, text, re.IGNORECASE)
     if not match:
@@ -147,19 +164,27 @@ def parse_reminder(text):
     ampm = match.group(3)
     reminder_text = match.group(4).strip() if match.group(4) else ""
 
-    # clean up reminder text — remove trigger words
+    # clean up reminder text
     reminder_text = re.sub(
         r"(can\s+you\s+|tolong\s+|please\s+)?(remind|ingatkan|peringat)(\s+me)?(\s+at)?",
         "", reminder_text, flags=re.IGNORECASE
     ).strip()
+    # clean up Malay time words from reminder text
+    reminder_text = re.sub(r"\b(malam|mlm|pagi|petang|ptg|tengah\s*hari|tgh\s*hari)\b", "", reminder_text, flags=re.IGNORECASE).strip()
 
     if not reminder_text:
         reminder_text = "your reminder"
 
-    if ampm:
-        if ampm.lower() == "pm" and hour != 12:
+    # determine am/pm — english takes priority, then Malay, then smart guess
+    effective_ampm = ampm if ampm else malay_time
+
+    if effective_ampm:
+        if effective_ampm.lower() == "pm" and hour != 12:
             hour += 12
-        elif ampm.lower() == "am" and hour == 12:
+        elif effective_ampm.lower() == "am" and hour == 12:
+            hour = 0
+        # special case: 12 malam = midnight = 0
+        if re.search(r"malam|mlm", text, re.IGNORECASE) and hour == 12:
             hour = 0
     else:
         # smart guess — if hour < 7 assume pm
@@ -193,7 +218,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "For reminders just say:\n"
         "'remind me at 1pm to eat lunch'\n"
         "'remind me in 10 minutes to drink water'\n"
-        "'tolong ingatkan 3pm meeting' 😊\n\n"
+        "'tolong ingatkan 3 petang meeting'\n"
+        "'ingatkan 12 malam ambil ubat' 😊\n\n"
         "Just type anything, I got you! 🚀"
     )
 
@@ -238,7 +264,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, data, uid = get_user(update.effective_user.id)
     chat_id = update.effective_chat.id
 
-    # detect reminder intent — broad keywords to catch Manglish
+    # detect reminder intent
     remind_keywords = [
         "remind", "peringat", "ingatkan", "tolong ingatkan",
         "can you remind", "boleh remind", "set reminder",
