@@ -2,11 +2,15 @@ import os
 import json
 import re
 from datetime import datetime, timedelta
+import pytz
 from groq import Groq
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 import asyncio
+
+# ── timezone ──────────────────────────────────────────────────────────────
+MY_TZ = pytz.timezone("Asia/Kuala_Lumpur")
 
 # ── clients ──────────────────────────────────────────────────────────────
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
@@ -60,7 +64,7 @@ You help with:
 The user's current notes:
 {notes_text}
 
-Today is {datetime.now().strftime("%A, %d %B %Y %I:%M %p")} (Malaysia time).
+Today is {datetime.now(MY_TZ).strftime("%A, %d %B %Y %I:%M %p")} (Malaysia time).
 
 Important rules:
 - ALWAYS reply, never leave the user without a response
@@ -94,7 +98,6 @@ async def send_reminder(bot, chat_id, text):
 
 # ── parse reminder from message ───────────────────────────────────────────
 def parse_reminder(text):
-    # matches patterns like "remind me at 3pm to eat", "remind 1:30pm lunch", "remind 9am meeting"
     pattern = r"remind(?:\s+me)?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(?:to\s+)?(.+)"
     match = re.search(pattern, text, re.IGNORECASE)
     if not match:
@@ -111,7 +114,7 @@ def parse_reminder(text):
         elif ampm.lower() == "am" and hour == 12:
             hour = 0
 
-    now = datetime.now()
+    now = datetime.now(MY_TZ)
     remind_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
     # if time already passed today, set for tomorrow
@@ -187,7 +190,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if any(kw in user_text.lower() for kw in remind_keywords):
         remind_time, reminder_text = parse_reminder(user_text)
         if remind_time and reminder_text:
-            # save reminder
             if "reminders" not in data[uid]:
                 data[uid]["reminders"] = []
             data[uid]["reminders"].append({
@@ -196,7 +198,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             })
             save_data(data)
 
-            # schedule it
             scheduler.add_job(
                 send_reminder,
                 "date",
