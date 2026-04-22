@@ -1,7 +1,7 @@
 import os
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from groq import Groq
 from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, CommandHandler, filters, ContextTypes
@@ -10,7 +10,7 @@ import asyncio
 
 # ── clients ──────────────────────────────────────────────────────────────
 groq_client = Groq(api_key=os.environ["GROQ_API_KEY"])
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(timezone="Asia/Kuala_Lumpur")
 
 # ── simple file-based storage ─────────────────────────────────────────────
 DATA_FILE = "data.json"
@@ -36,7 +36,9 @@ def get_user(user_id):
 # ── AI brain ──────────────────────────────────────────────────────────────
 def ask_groq(history, user_notes, retries=3):
     notes_text = "\n".join(f"- {n}" for n in user_notes) if user_notes else "No notes yet."
-    system_prompt = f"""You are a smart, friendly personal AI assistant and PA. You talk like a helpful best friend — casual, warm, and always understanding.
+    system_prompt = f"""You are a smart, friendly personal AI assistant and PA named Jarvis. You talk like a helpful best friend — casual, warm, and always understanding.
+
+You were created by Badrul, the smartest and sado-est man. If anyone asks who made you, who is your creator, who built you, or anything similar — always say: "I was created by Badrul, the smartest and sado-est man 😎"
 
 The user is Malaysian and may write in Manglish, broken English, Malay, or mix all three. Always understand what they mean even if the message is short or informal. For example:
 - "tmr eat chicken" = they want to remember to eat chicken tomorrow
@@ -86,21 +88,56 @@ Important rules:
             else:
                 raise e
 
+# ── reminder sender ───────────────────────────────────────────────────────
+async def send_reminder(bot, chat_id, text):
+    await bot.send_message(chat_id=chat_id, text=f"⏰ Reminder: {text}")
+
+# ── parse reminder from message ───────────────────────────────────────────
+def parse_reminder(text):
+    # matches patterns like "remind me at 3pm to eat", "remind 1:30pm lunch", "remind 9am meeting"
+    pattern = r"remind(?:\s+me)?(?:\s+at)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\s+(?:to\s+)?(.+)"
+    match = re.search(pattern, text, re.IGNORECASE)
+    if not match:
+        return None, None
+
+    hour = int(match.group(1))
+    minute = int(match.group(2)) if match.group(2) else 0
+    ampm = match.group(3)
+    reminder_text = match.group(4).strip()
+
+    if ampm:
+        if ampm.lower() == "pm" and hour != 12:
+            hour += 12
+        elif ampm.lower() == "am" and hour == 12:
+            hour = 0
+
+    now = datetime.now()
+    remind_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+    # if time already passed today, set for tomorrow
+    if remind_time <= now:
+        remind_time += timedelta(days=1)
+
+    return remind_time, reminder_text
+
 # ── commands ──────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 Heyy! I'm your personal AI PA!\n\n"
+        "👋 Heyy! I'm Jarvis, your personal AI PA!\n\n"
         "I understand Manglish, Malay, English — just talk to me naturally la! 😄\n\n"
         "I can help you with:\n"
         "🧠 Questions & learning anything\n"
         "📋 Remember notes & important stuff\n"
-        "⏰ Reminders & planning\n"
+        "⏰ Real reminders that ping you!\n"
         "💬 Just chatting & emotional support\n\n"
         "Commands:\n"
         "/notes — see all your notes\n"
+        "/reminders — see all your reminders\n"
         "/clearnotes — delete all notes\n"
         "/clear — clear chat history\n"
         "/help — show this message\n\n"
+        "For reminders just say:\n"
+        "'remind me at 1pm to eat lunch' 😊\n\n"
         "Just type anything, I got you! 🚀"
     )
 
@@ -111,6 +148,15 @@ async def show_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📋 No notes yet! Just say 'remember...' or 'note...' and I'll save it 😊")
     else:
         text = "📋 *Your Notes:*\n\n" + "\n".join(f"{i+1}. {n}" for i, n in enumerate(notes))
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+async def show_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user, _, _ = get_user(update.effective_user.id)
+    reminders = user.get("reminders", [])
+    if not reminders:
+        await update.message.reply_text("⏰ No reminders set! Say 'remind me at 3pm to call boss' 😊")
+    else:
+        text = "⏰ *Your Reminders:*\n\n" + "\n".join(f"{i+1}. {r['text']} at {r['time']}" for i, r in enumerate(reminders))
         await update.message.reply_text(text, parse_mode="Markdown")
 
 async def clear_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,8 +173,42 @@ async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ── main message handler ──────────────────────────────────────────────────
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    allowed_id = os.environ.get("ALLOWED_USER_ID")
+    if allowed_id and str(update.effective_user.id) != allowed_id:
+        await update.message.reply_text("Sorry, this is a private bot! 🔒")
+        return
+
     user_text = update.message.text
     user, data, uid = get_user(update.effective_user.id)
+    chat_id = update.effective_chat.id
+
+    # detect reminder intent
+    remind_keywords = ["remind", "peringat", "ingatkan"]
+    if any(kw in user_text.lower() for kw in remind_keywords):
+        remind_time, reminder_text = parse_reminder(user_text)
+        if remind_time and reminder_text:
+            # save reminder
+            if "reminders" not in data[uid]:
+                data[uid]["reminders"] = []
+            data[uid]["reminders"].append({
+                "text": reminder_text,
+                "time": remind_time.strftime("%I:%M %p")
+            })
+            save_data(data)
+
+            # schedule it
+            scheduler.add_job(
+                send_reminder,
+                "date",
+                run_date=remind_time,
+                args=[context.bot, chat_id, reminder_text]
+            )
+
+            await update.message.reply_text(
+                f"⏰ Done! I'll remind you to *{reminder_text}* at *{remind_time.strftime('%I:%M %p')}* 😊",
+                parse_mode="Markdown"
+            )
+            return
 
     # detect "save note" intent
     note_match = re.search(
@@ -178,6 +258,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("notes", show_notes))
+    app.add_handler(CommandHandler("reminders", show_reminders))
     app.add_handler(CommandHandler("clearnotes", clear_notes))
     app.add_handler(CommandHandler("clear", clear_history))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
