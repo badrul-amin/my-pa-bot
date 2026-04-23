@@ -33,7 +33,7 @@ def get_user(user_id):
     data = load_data()
     uid = str(user_id)
     if uid not in data:
-        data[uid] = {"notes": [], "reminders": [], "history": []}
+        data[uid] = {"notes": [], "reminders": [], "recurring": [], "history": []}
         save_data(data)
     return data[uid], data, uid
 
@@ -67,6 +67,7 @@ Examples of how they talk and what they mean:
 - "8 malam" = 8 PM
 - "7 pagi" = 7 AM
 - "3 petang" = 3 PM
+- "every day 6 petang" = set a daily recurring reminder at 6 PM
 
 You help with:
 - Answering any questions and explaining things simply and clearly
@@ -112,9 +113,50 @@ Important rules:
 async def send_reminder(bot, chat_id, text):
     await bot.send_message(chat_id=chat_id, text=f"⏰ Reminder: {text}")
 
-# ── parse reminder from message ───────────────────────────────────────────
+# ── parse time from text ──────────────────────────────────────────────────
+def parse_time_from_text(text):
+    # normalize dot to colon e.g. 5.30 -> 5:30
+    text = re.sub(r'(\d{1,2})\.(\d{2})(\s*(am|pm))?', r'\1:\2\3', text, flags=re.IGNORECASE)
+
+    # detect Malay time words
+    malay_time = ""
+    if re.search(r"malam|mlm", text, re.IGNORECASE):
+        malay_time = "pm"
+    elif re.search(r"pagi", text, re.IGNORECASE):
+        malay_time = "am"
+    elif re.search(r"tengah\s*hari|tgh\s*hari", text, re.IGNORECASE):
+        malay_time = "pm"
+    elif re.search(r"petang|ptg", text, re.IGNORECASE):
+        malay_time = "pm"
+
+    # match time pattern
+    pattern = r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?"
+    match = re.search(pattern, text, re.IGNORECASE)
+    if not match:
+        return None, None, None
+
+    hour = int(match.group(1))
+    minute = int(match.group(2)) if match.group(2) else 0
+    ampm = match.group(3)
+
+    effective_ampm = ampm if ampm else malay_time
+
+    if effective_ampm:
+        if effective_ampm.lower() == "pm" and hour != 12:
+            hour += 12
+        elif effective_ampm.lower() == "am" and hour == 12:
+            hour = 0
+        if re.search(r"malam|mlm", text, re.IGNORECASE) and hour == 12:
+            hour = 0
+    else:
+        if 1 <= hour <= 6:
+            hour += 12
+
+    return hour, minute, text
+
+# ── parse one-time reminder ───────────────────────────────────────────────
 def parse_reminder(text):
-    # normalize dot to colon e.g. 5.30 -> 5:30, 12.45pm -> 12:45pm
+    # normalize dot to colon
     text = re.sub(r'(\d{1,2})\.(\d{2})(\s*(am|pm))?', r'\1:\2\3', text, flags=re.IGNORECASE)
 
     # detect Malay time words
@@ -142,18 +184,16 @@ def parse_reminder(text):
         else:
             remind_time = now + timedelta(minutes=amount)
 
-        # extract what to remind about
         reminder_text = re.sub(
             r"(can\s+you\s+|tolong\s+|please\s+)?(remind|ingatkan|peringat)(\s+me)?(\s+in\s+\d+\s+\w+)?(\s+to)?",
             "", text, flags=re.IGNORECASE
         ).strip()
-        # clean up Malay time words from reminder text
         reminder_text = re.sub(r"\b(malam|mlm|pagi|petang|ptg|tengah\s*hari|tgh\s*hari)\b", "", reminder_text, flags=re.IGNORECASE).strip()
         if not reminder_text:
             reminder_text = "your reminder"
         return remind_time, reminder_text
 
-    # match specific time e.g. "at 1pm", "1:30pm", "12:45", "8 malam"
+    # match specific time
     pattern = r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+(?:to\s+)?(.+))?"
     match = re.search(pattern, text, re.IGNORECASE)
     if not match:
@@ -164,18 +204,15 @@ def parse_reminder(text):
     ampm = match.group(3)
     reminder_text = match.group(4).strip() if match.group(4) else ""
 
-    # clean up reminder text
     reminder_text = re.sub(
         r"(can\s+you\s+|tolong\s+|please\s+)?(remind|ingatkan|peringat)(\s+me)?(\s+at)?",
         "", reminder_text, flags=re.IGNORECASE
     ).strip()
-    # clean up Malay time words from reminder text
     reminder_text = re.sub(r"\b(malam|mlm|pagi|petang|ptg|tengah\s*hari|tgh\s*hari)\b", "", reminder_text, flags=re.IGNORECASE).strip()
 
     if not reminder_text:
         reminder_text = "your reminder"
 
-    # determine am/pm — english takes priority, then Malay, then smart guess
     effective_ampm = ampm if ampm else malay_time
 
     if effective_ampm:
@@ -183,11 +220,9 @@ def parse_reminder(text):
             hour += 12
         elif effective_ampm.lower() == "am" and hour == 12:
             hour = 0
-        # special case: 12 malam = midnight = 0
         if re.search(r"malam|mlm", text, re.IGNORECASE) and hour == 12:
             hour = 0
     else:
-        # smart guess — if hour < 7 assume pm
         if 1 <= hour <= 6:
             hour += 12
 
@@ -199,6 +234,38 @@ def parse_reminder(text):
 
     return remind_time, reminder_text
 
+# ── extract recurring reminder text ──────────────────────────────────────
+def extract_recurring_text(text, hour, minute):
+    cleaned = re.sub(
+        r"(every|everyday|every\s+day|setiap\s+hari|setiap|daily|harian)",
+        "", text, flags=re.IGNORECASE
+    )
+    cleaned = re.sub(r"\d{1,2}(:\d{2})?\s*(am|pm)?", "", cleaned)
+    cleaned = re.sub(r"\b(malam|mlm|pagi|petang|ptg|tengah\s*hari|tgh\s*hari)\b", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(remind|ingatkan|peringat|tolong|please|me|at|to)", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        cleaned = f"daily reminder at {hour:02d}:{minute:02d}"
+    return cleaned
+
+# ── restore recurring jobs on startup ────────────────────────────────────
+def restore_recurring_jobs(app):
+    data = load_data()
+    for uid, user_data in data.items():
+        for rec in user_data.get("recurring", []):
+            try:
+                scheduler.add_job(
+                    send_reminder,
+                    "cron",
+                    hour=rec["hour"],
+                    minute=rec["minute"],
+                    args=[app.bot, rec["chat_id"], rec["text"]],
+                    id=rec["job_id"],
+                    replace_existing=True
+                )
+            except Exception as e:
+                print(f"Failed to restore recurring job: {e}")
+
 # ── commands ──────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -207,19 +274,23 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I can help you with:\n"
         "🧠 Questions & learning anything\n"
         "📋 Remember notes & important stuff\n"
-        "⏰ Real reminders that ping you!\n"
+        "⏰ One-time & daily recurring reminders!\n"
         "💬 Just chatting & emotional support\n\n"
         "Commands:\n"
         "/notes — see all your notes\n"
-        "/reminders — see all your reminders\n"
+        "/reminders — see your reminders\n"
+        "/recurring — see daily reminders\n"
         "/clearnotes — delete all notes\n"
+        "/clearreminders — delete all recurring reminders\n"
         "/clear — clear chat history\n"
         "/help — show this message\n\n"
-        "For reminders just say:\n"
+        "For one-time reminders:\n"
         "'remind me at 1pm to eat lunch'\n"
-        "'remind me in 10 minutes to drink water'\n"
-        "'tolong ingatkan 3 petang meeting'\n"
-        "'ingatkan 12 malam ambil ubat' 😊\n\n"
+        "'ingatkan 8 malam ambil ubat'\n\n"
+        "For daily recurring reminders:\n"
+        "'every day 6 petang solat'\n"
+        "'setiap hari 9 malam check journal'\n"
+        "'daily 7 pagi exercise' 😊\n\n"
         "Just type anything, I got you! 🚀"
     )
 
@@ -236,9 +307,21 @@ async def show_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, _, _ = get_user(update.effective_user.id)
     reminders = user.get("reminders", [])
     if not reminders:
-        await update.message.reply_text("⏰ No reminders set! Say 'remind me at 3pm to call boss' 😊")
+        await update.message.reply_text("⏰ No one-time reminders set!")
     else:
-        text = "⏰ *Your Reminders:*\n\n" + "\n".join(f"{i+1}. {r['text']} at {r['time']}" for i, r in enumerate(reminders))
+        text = "⏰ *One-time Reminders:*\n\n" + "\n".join(f"{i+1}. {r['text']} at {r['time']}" for i, r in enumerate(reminders))
+        await update.message.reply_text(text, parse_mode="Markdown")
+
+async def show_recurring(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user, _, _ = get_user(update.effective_user.id)
+    recurring = user.get("recurring", [])
+    if not recurring:
+        await update.message.reply_text("🔁 No daily reminders set! Say 'every day 6 petang solat' to add one 😊")
+    else:
+        text = "🔁 *Daily Recurring Reminders:*\n\n" + "\n".join(
+            f"{i+1}. {r['text']} — every day at {r['hour']:02d}:{r['minute']:02d}"
+            for i, r in enumerate(recurring)
+        )
         await update.message.reply_text(text, parse_mode="Markdown")
 
 async def clear_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -246,6 +329,17 @@ async def clear_notes(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data[uid]["notes"] = []
     save_data(data)
     await update.message.reply_text("🗑️ All notes cleared!")
+
+async def clear_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user, data, uid = get_user(update.effective_user.id)
+    for rec in user.get("recurring", []):
+        try:
+            scheduler.remove_job(rec["job_id"])
+        except:
+            pass
+    data[uid]["recurring"] = []
+    save_data(data)
+    await update.message.reply_text("🗑️ All recurring reminders cleared!")
 
 async def clear_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, data, uid = get_user(update.effective_user.id)
@@ -264,7 +358,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, data, uid = get_user(update.effective_user.id)
     chat_id = update.effective_chat.id
 
-    # detect reminder intent
+    # detect RECURRING reminder intent
+    recurring_keywords = ["every day", "everyday", "every night", "setiap hari", "setiap", "daily", "harian"]
+    if any(kw in user_text.lower() for kw in recurring_keywords):
+        hour, minute, _ = parse_time_from_text(user_text)
+        if hour is not None:
+            reminder_text = extract_recurring_text(user_text, hour, minute)
+            job_id = f"recurring_{uid}_{hour}_{minute}_{len(user_text)}"
+
+            if "recurring" not in data[uid]:
+                data[uid]["recurring"] = []
+
+            data[uid]["recurring"].append({
+                "text": reminder_text,
+                "hour": hour,
+                "minute": minute,
+                "chat_id": chat_id,
+                "job_id": job_id
+            })
+            save_data(data)
+
+            scheduler.add_job(
+                send_reminder,
+                "cron",
+                hour=hour,
+                minute=minute,
+                args=[context.bot, chat_id, reminder_text],
+                id=job_id,
+                replace_existing=True
+            )
+
+            time_str = f"{hour:02d}:{minute:02d}"
+            await update.message.reply_text(
+                f"🔁 Done! I'll remind you to *{reminder_text}* every day at *{time_str}* 😊\n\n"
+                f"Use /clearreminders to remove all daily reminders.",
+                parse_mode="Markdown"
+            )
+            return
+
+    # detect ONE-TIME reminder intent
     remind_keywords = [
         "remind", "peringat", "ingatkan", "tolong ingatkan",
         "can you remind", "boleh remind", "set reminder",
@@ -309,14 +441,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # add to history
     data[uid]["history"].append({"role": "user", "content": user_text})
 
-    # keep last 20 messages only
     if len(data[uid]["history"]) > 20:
         data[uid]["history"] = data[uid]["history"][-20:]
 
-    # show typing indicator
     await context.bot.send_chat_action(update.effective_chat.id, "typing")
 
-    # get AI reply with retry + fallback
     try:
         reply = ask_groq(data[uid]["history"], data[uid]["notes"])
     except Exception as e:
@@ -343,11 +472,14 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("help", start))
     app.add_handler(CommandHandler("notes", show_notes))
     app.add_handler(CommandHandler("reminders", show_reminders))
+    app.add_handler(CommandHandler("recurring", show_recurring))
     app.add_handler(CommandHandler("clearnotes", clear_notes))
+    app.add_handler(CommandHandler("clearreminders", clear_reminders))
     app.add_handler(CommandHandler("clear", clear_history))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     app.add_error_handler(error_handler)
 
     scheduler.start()
+    restore_recurring_jobs(app)
     print("Bot is running...")
     app.run_polling(drop_pending_updates=True)
