@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import tempfile
 from datetime import datetime, timedelta
 import pytz
 from groq import Groq
@@ -336,6 +337,98 @@ def is_budget_set_message(text):
     has_amount = bool(re.search(r"rm\s*\d+|\d+\s*rm", text_lower))
     return has_keyword and has_amount
 
+# ── spending insights ─────────────────────────────────────────────────────
+async def send_daily_spending_summary(bot):
+    """Send daily spending summary to all users at 10 PM."""
+    data = load_data()
+    for uid, user_data in data.items():
+        try:
+            expenses = user_data.get("expenses", [])
+            budget = user_data.get("budget")
+            chat_id = None
+
+            # get chat_id from recurring or reminders
+            for rec in user_data.get("recurring", []):
+                chat_id = rec.get("chat_id")
+                break
+
+            if not chat_id or not expenses:
+                continue
+
+            total_spent = sum(e["amount"] for e in expenses)
+            lines = "\n".join(f"• {e['item'].title()} — RM{e['amount']:.2f}" for e in expenses)
+
+            if budget:
+                balance = budget - total_spent
+                percent = (total_spent / budget) * 100
+                emoji = "✅" if balance > 0 else "🚨"
+                budget_line = f"{emoji} Balance: RM{balance:.2f} ({percent:.0f}% used)"
+            else:
+                budget_line = "_No budget set. Use /updatebudget to set one!_"
+
+            biggest = max(expenses, key=lambda e: e["amount"])
+
+            text = (
+                f"📊 *Daily Spending Summary*\n"
+                f"─────────────────\n"
+                f"{lines}\n"
+                f"─────────────────\n"
+                f"💸 Total: RM{total_spent:.2f}\n"
+                f"{budget_line}\n\n"
+                f"🏆 Biggest spend: {biggest['item'].title()} (RM{biggest['amount']:.2f})\n\n"
+                f"_Goodnight! 🌙 Keep tracking tomorrow too!_"
+            )
+            await bot.send_message(chat_id=chat_id, text=text, parse_mode="Markdown")
+        except Exception as e:
+            print(f"Failed to send daily summary to {uid}: {e}")
+
+async def check_budget_warning(bot, chat_id, uid):
+    """Send warning if user hits 80% or exceeds budget."""
+    data = load_data()
+    user_data = data.get(uid, {})
+    budget = user_data.get("budget")
+    expenses = user_data.get("expenses", [])
+
+    if not budget or not expenses:
+        return
+
+    total_spent = sum(e["amount"] for e in expenses)
+    percent = (total_spent / budget) * 100
+
+    # only warn at exactly these thresholds to avoid spamming
+    warned_80 = user_data.get("_warned_80", False)
+    warned_exceeded = user_data.get("_warned_exceeded", False)
+
+    if total_spent > budget and not warned_exceeded:
+        overspent = total_spent - budget
+        data[uid]["_warned_exceeded"] = True
+        data[uid]["_warned_80"] = True
+        save_data(data)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"🚨 *Budget Exceeded!*\n\n"
+                f"You've spent *RM{total_spent:.2f}* out of RM{budget:.2f}\n"
+                f"Over by: *RM{overspent:.2f}*\n\n"
+                f"Careful with spending! 😬"
+            ),
+            parse_mode="Markdown"
+        )
+    elif percent >= 80 and not warned_80:
+        remaining = budget - total_spent
+        data[uid]["_warned_80"] = True
+        save_data(data)
+        await bot.send_message(
+            chat_id=chat_id,
+            text=(
+                f"⚠️ *80% Budget Used!*\n\n"
+                f"Spent: RM{total_spent:.2f} / RM{budget:.2f}\n"
+                f"Only *RM{remaining:.2f}* left!\n\n"
+                f"Jimat sikit tau 😅"
+            ),
+            parse_mode="Markdown"
+        )
+
 # ── restore recurring jobs on startup ────────────────────────────────────
 def restore_recurring_jobs(app):
     data = load_data()
@@ -400,6 +493,8 @@ async def update_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     old_budget = user.get("budget")
     data[uid]["budget"] = amount
+    data[uid]["_warned_80"] = False
+    data[uid]["_warned_exceeded"] = False
     save_data(data)
 
     if old_budget is not None:
@@ -456,6 +551,8 @@ async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, data, uid = get_user(update.effective_user.id)
     data[uid]["expenses"] = []
+    data[uid]["_warned_80"] = False
+    data[uid]["_warned_exceeded"] = False
     save_data(data)
     await update.message.reply_text("🗑️ All expenses cleared! Fresh start 💰")
 
@@ -705,6 +802,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
 
             await update.message.reply_text(reply, parse_mode="Markdown")
+
+            # check budget warnings
+            await check_budget_warning(context.bot, chat_id, uid)
             return
 
     # ── normal AI chat ────────────────────────────────────────────────────
@@ -725,6 +825,68 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     save_data(data)
 
     await update.message.reply_text(reply)
+
+# ── voice message handler ────────────────────────────────────────────────
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    allowed_id = os.environ.get("ALLOWED_USER_ID")
+    if allowed_id and str(update.effective_user.id) != allowed_id:
+        await update.message.reply_text("Sorry, this is a private bot! 🔒")
+        return
+
+    user, data, uid = get_user(update.effective_user.id)
+
+    await context.bot.send_chat_action(update.effective_chat.id, "typing")
+    await update.message.reply_text("🎤 Transcribing your voice note...")
+
+    try:
+        # download voice file
+        voice = update.message.voice
+        voice_file = await context.bot.get_file(voice.file_id)
+
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        await voice_file.download_to_drive(tmp_path)
+
+        # transcribe using Groq Whisper
+        with open(tmp_path, "rb") as audio_file:
+            transcription = groq_client.audio.transcriptions.create(
+                model="whisper-large-v3",
+                file=audio_file,
+                language="ms"  # Malay/Malaysian — handles Manglish well
+            )
+
+        os.unlink(tmp_path)
+        transcribed_text = transcription.text.strip()
+
+        if not transcribed_text:
+            await update.message.reply_text("Hmm I couldn't catch that 😅 Try again?")
+            return
+
+        await update.message.reply_text(f"🎤 _You said: {transcribed_text}_", parse_mode="Markdown")
+
+        # process transcribed text like a normal message
+        data[uid]["history"].append({"role": "user", "content": transcribed_text})
+
+        if len(data[uid]["history"]) > 20:
+            data[uid]["history"] = data[uid]["history"][-20:]
+
+        await context.bot.send_chat_action(update.effective_chat.id, "typing")
+
+        try:
+            reply = ask_groq(data[uid]["history"], data[uid]["notes"])
+        except Exception as e:
+            print(f"Groq error: {e}")
+            reply = "Eh sorry, my brain lagged sikit 😅 Try again in a few seconds!"
+
+        data[uid]["history"].append({"role": "assistant", "content": reply})
+        save_data(data)
+
+        await update.message.reply_text(reply)
+
+    except Exception as e:
+        print(f"Voice error: {e}")
+        await update.message.reply_text("Alamak couldn't process your voice note 😅 Try again!")
 
 # ── error handler ─────────────────────────────────────────────────────────
 async def error_handler(update, context):
@@ -751,9 +913,22 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("clearreminders", clear_reminders))
     app.add_handler(CommandHandler("clear", clear_history))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_error_handler(error_handler)
 
     scheduler.start()
     restore_recurring_jobs(app)
+
+    # daily spending summary at 10 PM Malaysia time
+    scheduler.add_job(
+        send_daily_spending_summary,
+        "cron",
+        hour=22,
+        minute=0,
+        args=[app.bot],
+        id="daily_spending_summary",
+        replace_existing=True
+    )
+
     print("Bot is running...")
     app.run_polling(drop_pending_updates=True)
