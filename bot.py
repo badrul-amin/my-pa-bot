@@ -33,8 +33,14 @@ def get_user(user_id):
     data = load_data()
     uid = str(user_id)
     if uid not in data:
-        data[uid] = {"notes": [], "reminders": [], "recurring": [], "history": []}
+        data[uid] = {"notes": [], "reminders": [], "recurring": [], "history": [], "expenses": [], "budget": None}
         save_data(data)
+    # migrate old users who don't have expenses/budget keys
+    if "expenses" not in data[uid]:
+        data[uid]["expenses"] = []
+    if "budget" not in data[uid]:
+        data[uid]["budget"] = None
+    save_data(data)
     return data[uid], data, uid
 
 # ── AI brain ──────────────────────────────────────────────────────────────
@@ -44,7 +50,46 @@ def ask_groq(history, user_notes, retries=3):
 
 You were created by Badrul, the smartest and sado-est man. If anyone asks who made you, who is your creator, who built you, or anything similar — always say: "I was created by Badrul, the smartest and sado-est man 😎"
 
-The user is Malaysian and writes in Manglish, broken English, Malay, or mix of all three. You MUST always understand what they mean even if the message is short, informal, or grammatically wrong. Never ask them to rephrase. Just understand and respond!
+The user is Malaysian and writes in Manglish, broken English, Malay, or mix of all three. You MUST always understand what they mean even if the message is short, informal, grammatically wrong, has typos, or uses Malaysian slang. Never ask them to rephrase. Just understand and respond!
+
+You are very good at understanding typos and misspellings. For example:
+- "snakc" = "snack"
+- "blie" = "beli"
+- "mkaan" = "makan"
+- "spned" = "spent"
+- "rmeber" = "remember"
+- "wat" = "what"
+- "u" = "you"
+- "r" = "are"
+- "la", "lah", "lor", "leh", "kan", "je", "je la" = common Malaysian filler words, understand the context
+
+Malaysian lingo and slang you understand:
+- "tapau" = takeaway food
+- "lepak" = hang out / chill
+- "duit" = money
+- "belanja" = treat someone / spend money
+- "makan" = eat / food
+- "kedai" = shop/store
+- "barang" = items/things
+- "mahal" = expensive
+- "murah" = cheap
+- "habis" = finished/used up
+- "abis" = finished (informal)
+- "nak" = want
+- "tak" = no/not
+- "boleh" = can
+- "jangan" = don't
+- "dah" = already
+- "buat" = do/make
+- "pergi" = go
+- "tengok" = see/watch
+- "cari" = find/look for
+- "kena" = have to / got
+- "gaji" = salary
+- "hutang" = debt
+- "jimat" = save money
+- "membazir" = wasteful
+- "bazir" = waste
 
 Examples of how they talk and what they mean:
 - "tmr eat chicken" = remind me to eat chicken tomorrow
@@ -68,6 +113,9 @@ Examples of how they talk and what they mean:
 - "7 pagi" = 7 AM
 - "3 petang" = 3 PM
 - "every day 6 petang" = set a daily recurring reminder at 6 PM
+- "spent rm15 snakc" = spent RM15 on snack (typo, understand it)
+- "beli mkanan rm10" = bought food for RM10
+- "habis rm20 petrol" = spent RM20 on petrol
 
 You help with:
 - Answering any questions and explaining things simply and clearly
@@ -76,6 +124,7 @@ You help with:
 - Emotional support and casual friendly chat
 - Learning buddy — explain tech, science, anything in simple words
 - General life advice like a smart friend would give
+- Tracking expenses and budget when user mentions spending money
 
 The user's current notes:
 {notes_text}
@@ -91,7 +140,8 @@ Important rules:
 - If they seem stressed or tired, be empathetic first before giving advice
 - Use emojis naturally but don't overdo it
 - Never say "As an AI" or "I cannot" — just help them!
-- Never ask them to rephrase or be more specific — just understand and answer!"""
+- Never ask them to rephrase or be more specific — just understand and answer!
+- Always understand typos and slang — never get confused by them"""
 
     for attempt in range(retries):
         try:
@@ -115,10 +165,8 @@ async def send_reminder(bot, chat_id, text):
 
 # ── parse time from text ──────────────────────────────────────────────────
 def parse_time_from_text(text):
-    # normalize dot to colon e.g. 5.30 -> 5:30
     text = re.sub(r'(\d{1,2})\.(\d{2})(\s*(am|pm))?', r'\1:\2\3', text, flags=re.IGNORECASE)
 
-    # detect Malay time words
     malay_time = ""
     if re.search(r"malam|mlm", text, re.IGNORECASE):
         malay_time = "pm"
@@ -129,7 +177,6 @@ def parse_time_from_text(text):
     elif re.search(r"petang|ptg", text, re.IGNORECASE):
         malay_time = "pm"
 
-    # match time pattern
     pattern = r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?"
     match = re.search(pattern, text, re.IGNORECASE)
     if not match:
@@ -156,10 +203,8 @@ def parse_time_from_text(text):
 
 # ── parse one-time reminder ───────────────────────────────────────────────
 def parse_reminder(text):
-    # normalize dot to colon
     text = re.sub(r'(\d{1,2})\.(\d{2})(\s*(am|pm))?', r'\1:\2\3', text, flags=re.IGNORECASE)
 
-    # detect Malay time words
     malay_time = ""
     if re.search(r"malam|mlm", text, re.IGNORECASE):
         malay_time = "pm"
@@ -170,7 +215,6 @@ def parse_reminder(text):
     elif re.search(r"petang|ptg", text, re.IGNORECASE):
         malay_time = "pm"
 
-    # match "in X minutes/hours"
     relative_match = re.search(
         r"in\s+(\d+)\s+(minute|minutes|min|hour|hours|jam|minit)",
         text, re.IGNORECASE
@@ -193,7 +237,6 @@ def parse_reminder(text):
             reminder_text = "your reminder"
         return remind_time, reminder_text
 
-    # match specific time
     pattern = r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s+(?:to\s+)?(.+))?"
     match = re.search(pattern, text, re.IGNORECASE)
     if not match:
@@ -248,6 +291,51 @@ def extract_recurring_text(text, hour, minute):
         cleaned = f"daily reminder at {hour:02d}:{minute:02d}"
     return cleaned
 
+# ── parse expense from text ───────────────────────────────────────────────
+def parse_expense(text):
+    """Try to extract amount and item from natural language expense message."""
+    # match RM amount patterns: rm15, rm 15, RM15.50, rm15 snack
+    match = re.search(
+        r"(?:rm|RM|ringgit)?\s*(\d+(?:\.\d{1,2})?)\s*(?:rm|RM|ringgit)?",
+        text, re.IGNORECASE
+    )
+    if not match:
+        return None, None
+
+    amount = float(match.group(1))
+
+    # remove keywords and amount to get the item description
+    item = text
+    item = re.sub(r"(spent|spend|beli|beli|belanja|habis|bayar|paid|pay|keluar|kuar|used|guna)", "", item, flags=re.IGNORECASE)
+    item = re.sub(r"(?:rm|RM|ringgit)?\s*\d+(?:\.\d{1,2})?", "", item)
+    item = re.sub(r"(rm|RM|ringgit)", "", item)
+    item = re.sub(r"\s+", " ", item).strip(" ,-")
+
+    if not item:
+        item = "misc"
+
+    return amount, item
+
+def is_expense_message(text):
+    """Detect if message is about spending money."""
+    keywords = [
+        "spent", "spend", "beli", "belanja", "habis", "bayar", "paid", "pay",
+        "keluar duit", "kuar duit", "rm", "ringgit", "used rm", "guna rm",
+        "beli rm", "makan rm", "tapau rm"
+    ]
+    text_lower = text.lower()
+    has_keyword = any(kw in text_lower for kw in keywords)
+    has_amount = bool(re.search(r"rm\s*\d+|\d+\s*rm|\d+\s*ringgit", text_lower))
+    return has_keyword or has_amount
+
+def is_budget_set_message(text):
+    """Detect if user is setting initial budget."""
+    keywords = ["i have", "ada", "budget", "duit aku", "my money", "i got", "aku ada"]
+    text_lower = text.lower()
+    has_keyword = any(kw in text_lower for kw in keywords)
+    has_amount = bool(re.search(r"rm\s*\d+|\d+\s*rm", text_lower))
+    return has_keyword and has_amount
+
 # ── restore recurring jobs on startup ────────────────────────────────────
 def restore_recurring_jobs(app):
     data = load_data()
@@ -266,6 +354,111 @@ def restore_recurring_jobs(app):
             except Exception as e:
                 print(f"Failed to restore recurring job: {e}")
 
+# ── EXPENSE COMMANDS ──────────────────────────────────────────────────────
+
+async def show_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user, _, _ = get_user(update.effective_user.id)
+    budget = user.get("budget")
+    expenses = user.get("expenses", [])
+    total_spent = sum(e["amount"] for e in expenses)
+
+    if budget is None:
+        await update.message.reply_text(
+            "💰 No budget set yet!\n\nTell me how much you have, like:\n'I have RM500 this week'\n\nOr use /updatebudget RM500"
+        )
+        return
+
+    balance = budget - total_spent
+    emoji = "✅" if balance > 0 else "🚨"
+
+    text = (
+        f"💰 *Budget Overview*\n"
+        f"─────────────────\n"
+        f"Budget:       RM{budget:.2f}\n"
+        f"Total Spent:  RM{total_spent:.2f}\n"
+        f"─────────────────\n"
+        f"{emoji} Balance:  RM{balance:.2f}"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def update_budget(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user, data, uid = get_user(update.effective_user.id)
+    args = context.args
+
+    amount = None
+    if args:
+        text = " ".join(args)
+        match = re.search(r"(\d+(?:\.\d{1,2})?)", text)
+        if match:
+            amount = float(match.group(1))
+
+    if amount is None:
+        await update.message.reply_text(
+            "💰 How much is your budget?\n\nExample: /updatebudget 500 or /updatebudget RM500"
+        )
+        return
+
+    old_budget = user.get("budget")
+    data[uid]["budget"] = amount
+    save_data(data)
+
+    if old_budget is not None:
+        await update.message.reply_text(
+            f"💰 Budget updated!\n\nOld budget: RM{old_budget:.2f}\nNew budget: RM{amount:.2f} 😊"
+        )
+    else:
+        await update.message.reply_text(
+            f"💰 Budget set to RM{amount:.2f}!\n\nNow just tell me when you spend money, like:\n'spent RM15 makan' 😊"
+        )
+
+async def show_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user, _, _ = get_user(update.effective_user.id)
+    expenses = user.get("expenses", [])
+    budget = user.get("budget")
+
+    if not expenses:
+        await update.message.reply_text("📊 No expenses recorded yet! Just say 'spent RM15 makan' and I'll track it 😊")
+        return
+
+    total = sum(e["amount"] for e in expenses)
+    lines = "\n".join(f"{i+1}. {e['item'].title()} — RM{e['amount']:.2f}" for i, e in enumerate(expenses))
+
+    text = f"📊 *Expense List*\n─────────────────\n{lines}\n─────────────────\nTotal: RM{total:.2f}"
+
+    if budget is not None:
+        balance = budget - total
+        emoji = "✅" if balance > 0 else "🚨"
+        text += f"\n{emoji} Balance: RM{balance:.2f}"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def delete_expense(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user, data, uid = get_user(update.effective_user.id)
+    expenses = user.get("expenses", [])
+
+    if not expenses:
+        await update.message.reply_text("📊 No expenses to delete!")
+        return
+
+    # store state that we're waiting for delete selection
+    data[uid]["_awaiting_delete"] = True
+    save_data(data)
+
+    lines = "\n".join(f"{i+1}. {e['item'].title()} — RM{e['amount']:.2f}" for i, e in enumerate(expenses))
+    text = (
+        f"🗑️ *Which expense to delete?*\n\n"
+        f"{lines}\n\n"
+        f"Reply with the *number* to delete one\n"
+        f"Or reply *all* to clear everything"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def clear_expenses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user, data, uid = get_user(update.effective_user.id)
+    data[uid]["expenses"] = []
+    save_data(data)
+    await update.message.reply_text("🗑️ All expenses cleared! Fresh start 💰")
+
 # ── commands ──────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -274,23 +467,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "I can help you with:\n"
         "🧠 Questions & learning anything\n"
         "📋 Remember notes & important stuff\n"
-        "⏰ One-time & daily recurring reminders!\n"
+        "⏰ One-time & daily recurring reminders\n"
+        "💰 Budget & expense tracking\n"
         "💬 Just chatting & emotional support\n\n"
         "Commands:\n"
         "/notes — see all your notes\n"
         "/reminders — see your reminders\n"
         "/recurring — see daily reminders\n"
+        "/budget — see budget & balance\n"
+        "/updatebudget — set/change budget\n"
+        "/expenses — see all expenses\n"
+        "/deleteexpense — delete a specific expense\n"
+        "/clearexpenses — clear all expenses\n"
         "/clearnotes — delete all notes\n"
         "/clearreminders — delete all recurring reminders\n"
         "/clear — clear chat history\n"
         "/help — show this message\n\n"
-        "For one-time reminders:\n"
-        "'remind me at 1pm to eat lunch'\n"
-        "'ingatkan 8 malam ambil ubat'\n\n"
-        "For daily recurring reminders:\n"
-        "'every day 6 petang solat'\n"
-        "'setiap hari 9 malam check journal'\n"
-        "'daily 7 pagi exercise' 😊\n\n"
+        "Expense tracking — just say naturally:\n"
+        "'I have RM500 this week' → sets budget\n"
+        "'spent RM15 makan' → logs expense\n"
+        "'beli snack RM4' → logs expense 😊\n\n"
         "Just type anything, I got you! 🚀"
     )
 
@@ -358,7 +554,36 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user, data, uid = get_user(update.effective_user.id)
     chat_id = update.effective_chat.id
 
-    # detect RECURRING reminder intent
+    # ── handle delete expense awaiting reply ──────────────────────────────
+    if user.get("_awaiting_delete"):
+        data[uid]["_awaiting_delete"] = False
+        expenses = data[uid].get("expenses", [])
+
+        if user_text.strip().lower() == "all":
+            data[uid]["expenses"] = []
+            save_data(data)
+            await update.message.reply_text("🗑️ All expenses cleared! Fresh start 💰")
+            return
+
+        try:
+            idx = int(user_text.strip()) - 1
+            if 0 <= idx < len(expenses):
+                removed = expenses.pop(idx)
+                data[uid]["expenses"] = expenses
+                save_data(data)
+                await update.message.reply_text(
+                    f"🗑️ Deleted: *{removed['item'].title()} — RM{removed['amount']:.2f}*\n\nUse /expenses to see updated list 😊",
+                    parse_mode="Markdown"
+                )
+            else:
+                save_data(data)
+                await update.message.reply_text("❌ Invalid number. Use /deleteexpense to try again.")
+        except ValueError:
+            save_data(data)
+            await update.message.reply_text("❌ Please reply with a number or 'all'. Use /deleteexpense to try again.")
+        return
+
+    # ── detect RECURRING reminder intent ─────────────────────────────────
     recurring_keywords = ["every day", "everyday", "every night", "setiap hari", "setiap", "daily", "harian"]
     if any(kw in user_text.lower() for kw in recurring_keywords):
         hour, minute, _ = parse_time_from_text(user_text)
@@ -396,7 +621,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # detect ONE-TIME reminder intent
+    # ── detect ONE-TIME reminder intent ──────────────────────────────────
     remind_keywords = [
         "remind", "peringat", "ingatkan", "tolong ingatkan",
         "can you remind", "boleh remind", "set reminder",
@@ -426,7 +651,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # detect "save note" intent
+    # ── detect "save note" intent ─────────────────────────────────────────
     note_match = re.search(
         r"(remember|note|save|catat|ingat|simpan)[:\s]+(.+)",
         user_text, re.IGNORECASE
@@ -438,7 +663,51 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"📌 Saved! I'll remember this:\n_{note}_", parse_mode="Markdown")
         return
 
-    # add to history
+    # ── detect BUDGET SET intent (natural language) ───────────────────────
+    if is_budget_set_message(user_text):
+        match = re.search(r"(\d+(?:\.\d{1,2})?)", user_text)
+        if match:
+            amount = float(match.group(1))
+            data[uid]["budget"] = amount
+            save_data(data)
+            await update.message.reply_text(
+                f"💰 Got it! Budget set to *RM{amount:.2f}* 😊\n\nNow just tell me when you spend, like 'spent RM15 makan'!",
+                parse_mode="Markdown"
+            )
+            return
+
+    # ── detect EXPENSE intent ─────────────────────────────────────────────
+    if is_expense_message(user_text):
+        amount, item = parse_expense(user_text)
+        if amount is not None:
+            if "expenses" not in data[uid]:
+                data[uid]["expenses"] = []
+            data[uid]["expenses"].append({"amount": amount, "item": item})
+
+            budget = data[uid].get("budget")
+            total_spent = sum(e["amount"] for e in data[uid]["expenses"])
+
+            save_data(data)
+
+            if budget is not None:
+                balance = budget - total_spent
+                emoji = "✅" if balance > 0 else "🚨"
+                reply = (
+                    f"💸 Noted! *{item.title()} — RM{amount:.2f}*\n"
+                    f"Total spent: RM{total_spent:.2f}\n"
+                    f"{emoji} Balance left: RM{balance:.2f}"
+                )
+            else:
+                reply = (
+                    f"💸 Noted! *{item.title()} — RM{amount:.2f}*\n"
+                    f"Total spent: RM{total_spent:.2f}\n\n"
+                    f"_Tip: Set a budget with /updatebudget to track balance!_"
+                )
+
+            await update.message.reply_text(reply, parse_mode="Markdown")
+            return
+
+    # ── normal AI chat ────────────────────────────────────────────────────
     data[uid]["history"].append({"role": "user", "content": user_text})
 
     if len(data[uid]["history"]) > 20:
@@ -473,6 +742,11 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("notes", show_notes))
     app.add_handler(CommandHandler("reminders", show_reminders))
     app.add_handler(CommandHandler("recurring", show_recurring))
+    app.add_handler(CommandHandler("budget", show_budget))
+    app.add_handler(CommandHandler("updatebudget", update_budget))
+    app.add_handler(CommandHandler("expenses", show_expenses))
+    app.add_handler(CommandHandler("deleteexpense", delete_expense))
+    app.add_handler(CommandHandler("clearexpenses", clear_expenses))
     app.add_handler(CommandHandler("clearnotes", clear_notes))
     app.add_handler(CommandHandler("clearreminders", clear_reminders))
     app.add_handler(CommandHandler("clear", clear_history))
